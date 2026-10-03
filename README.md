@@ -8,9 +8,9 @@ mistaken command cannot reach beyond one project. Copy it into any project and s
 ```
 sudo apt install -y podman uidmap passt      # once per machine
 
-cp -r ~/programming/claude-container-template/.devcontainer /path/to/project/
+cp -r ~/programming/ai-container-template/.devcontainer /path/to/project/
 mkdir -p /path/to/project/scripts
-cp ~/programming/claude-container-template/scripts/ai-container.sh /path/to/project/scripts/
+cp ~/programming/ai-container-template/scripts/ai-container.sh /path/to/project/scripts/
 
 cd /path/to/project
 scripts/ai-container.sh claude
