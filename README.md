@@ -1,7 +1,7 @@
-# Claude Code in a container — template
+# AI agents in a container — template
 
-Drop-in setup for running Claude Code inside a rootless Podman container, so a mistaken command
-cannot reach beyond one project. Copy it into any project and start.
+Drop-in setup for running Claude Code or OpenAI Codex inside a rootless Podman container, so a
+mistaken command cannot reach beyond one project. Copy it into any project and start.
 
 ## Use it
 
@@ -10,23 +10,36 @@ sudo apt install -y podman uidmap passt      # once per machine
 
 cp -r ~/programming/claude-container-template/.devcontainer /path/to/project/
 mkdir -p /path/to/project/scripts
-cp ~/programming/claude-container-template/scripts/claude-container.sh /path/to/project/scripts/
+cp ~/programming/claude-container-template/scripts/ai-container.sh /path/to/project/scripts/
 
 cd /path/to/project
-scripts/claude-container.sh
+scripts/ai-container.sh claude
 ```
 
-The first start builds the image (a few minutes, ~500 MB downloaded); later starts take seconds.
-Sign in to Claude the first time; it is remembered afterwards.
+The first start builds the image (a few minutes, ~1 GB downloaded); later starts take seconds.
+Choosing the tool is required — there is no default:
 
 ```
-scripts/claude-container.sh            # Claude, web traffic open
-scripts/claude-container.sh --strict   # Claude, only the hosts in init-firewall.sh
-scripts/claude-container.sh bash       # a shell, in the running container if Claude is up
+scripts/ai-container.sh claude             # Claude Code, web traffic open
+scripts/ai-container.sh codex              # OpenAI Codex
+scripts/ai-container.sh bash               # a shell
+scripts/ai-container.sh --strict claude    # any of them, with only the hosts in init-firewall.sh
 ```
 
-The container is named after the project directory, and each project keeps its own image, login and
-caches, so several projects can each have one without colliding.
+**Signing in.** Claude asks the first time, and the login is remembered. Codex needs one step of its
+own, once: `scripts/ai-container.sh codex login --device-auth`. Its ordinary login sends the browser
+back to an address inside the container, which the host cannot reach; the device login gives you a
+code to enter on the web instead.
+
+If the container is already running, the tool starts inside that one, so Claude and Codex can work
+in the same project side by side. The container is named after the project directory, and each
+project keeps its own image, logins and caches, so several projects can each have one.
+
+**Codex keeps its own sandbox too.** It works inside this container — writes outside the project
+and network access are refused until Codex asks — so it runs with its defaults, and you get both
+layers. On an Ubuntu host it would not: its sandbox needs unprivileged user namespaces, which
+Ubuntu's AppArmor restricts, and its read-only mode blocks writing but not reading the rest of the
+machine.
 
 ## What it protects, and what it does not
 
@@ -35,21 +48,21 @@ other projects are mounted in; there is no `sudo`, no capabilities and `no_new_p
 the *host* runs code from are read-only inside — `.git/hooks`, `.git/config`, `.claude`, `.idea`,
 `.vscode`, `.devcontainer` and the launcher itself.
 
-**It does not protect:** the project itself. Claude can change or delete anything in it, so commit
-often. Nor does it protect against code you then run on the host — read the diff first.
+**It does not protect:** the project itself. The agent can change or delete anything in it, so
+commit often. Nor does it protect against code you then run on the host — read the diff first.
 
 **Network.** Open by default: HTTP and HTTPS to the internet, every other port refused, and the home
 network (private addresses) refused too, so the router and printers stay out of reach. IPv6 is off
 in both modes, so it cannot route round the rules, and DNS goes only to the container's own
 resolvers. `--strict` allows a listed handful of hosts instead — an allowlist worth having when a
-session should run unwatched, since with the web open a page Claude reads could carry instructions
-to send the project somewhere. The mode is chosen on the host; the launcher and firewall are
-read-only inside, so Claude cannot change either.
+session should run unwatched, since with the web open a page the agent reads could carry
+instructions to send the project somewhere. The mode is chosen on the host; the launcher and
+firewall are read-only inside, so the agent cannot change either.
 
 ## Fit it to the project
 
-- **Tools:** the image starts at what Claude needs to work at all — git, Node, Python, Claude Code,
-  and what the firewall uses — about 830 MB. Everything else is an optional block in
+- **Tools:** the image starts at what the agents need to work at all — git, Node, Python, Claude
+  Code, Codex, and what the firewall uses — about 1 GB. Everything else is an optional block in
   `.devcontainer/Dockerfile`, commented out with what it gives and what it costs: a browser
   (Playwright with Chromium, ~400 MB), numpy, PDF reading, SQLite, a Postgres client, a C toolchain.
   Uncomment what the project needs; the image rebuilds once, on the next start. Anything Claude
@@ -61,7 +74,8 @@ read-only inside, so Claude cannot change either.
   Playwright browser build that does not match the library is refused, and so is a mismatched
   `dotnet-ef`.
 - **Strict hosts:** add package registries and documentation sites to `ALLOWED_HOSTS` in
-  `.devcontainer/init-firewall.sh`.
+  `.devcontainer/init-firewall.sh`. The Anthropic and OpenAI hosts the two agents need are there
+  already.
 - **Caches:** the container keeps `~/.cache` in a volume. For a toolchain that caches elsewhere
   (`~/.nuget`, `~/.m2`, `~/.cargo`), add a volume for it in the launcher, or every start downloads
   the dependencies again.
@@ -75,7 +89,9 @@ read-only inside, so Claude cannot change either.
 
 ## Sessions and settings are separate
 
-`/resume` inside lists only sessions held inside, and the other way round. Host transcripts are
+Logins and settings live in volumes of their own — one for Claude, one for Codex — and never in
+your home directory. For Claude, `/resume` inside lists only sessions held inside, and the other way
+round. Host transcripts are
 deliberately not mounted in: a transcript the container could write is one a host session might
 later resume, with every credential on the machine. What carries over is Claude's memory for the
 project. Settings are separate too, so choose the model with `/model` inside.

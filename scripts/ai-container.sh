@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Starts Claude Code inside a container, so a mistaken command cannot reach beyond this project.
+# Starts an AI coding agent inside a container, so a mistaken command cannot reach beyond this project.
 #
-#   scripts/claude-container.sh            # start Claude, web traffic open
-#   scripts/claude-container.sh --strict   # start Claude, only the hosts in init-firewall.sh
-#   scripts/claude-container.sh bash       # a shell: in the running container if Claude is up,
-#                                          # otherwise in a fresh one
+#   scripts/ai-container.sh claude              # Claude Code
+#   scripts/ai-container.sh codex               # OpenAI Codex
+#   scripts/ai-container.sh bash                # a shell, to look around
+#   scripts/ai-container.sh --strict claude     # any of them, with only the hosts in init-firewall.sh
+#
+# Anything after the tool goes to it: `scripts/ai-container.sh codex login --device-auth` signs Codex
+# in, which is needed once — its ordinary login sends the browser back to an address inside the
+# container, which the host cannot reach. If the container is already running, the tool starts in
+# that one rather than a second, so Claude and Codex can work side by side.
 #
 # The container lives exactly as long as the program it was started with, and is deleted when that
-# ends. Only the project, Claude's memory, its login and the caches carry over; anything installed
+# ends. Only the project, Claude's memory, the logins and the caches carry over; anything installed
 # during a session is gone next time, so a tool the project always needs belongs in the Dockerfile.
 #
 # What the container can reach:
@@ -30,11 +35,25 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project="$(basename "$root")"
-name="claude-${project//[^a-zA-Z0-9_.-]/-}"
+name="ai-${project//[^a-zA-Z0-9_.-]/-}"
 image="localhost/$name"
+# Named volumes holding the logins, Claude's sessions and the caches. Changing this starts them over.
+volumes="$name"
+
+usage() {
+  echo "Usage: scripts/ai-container.sh [--strict] <claude|codex|bash> [arguments for it]"
+  echo "First time with Codex: scripts/ai-container.sh codex login --device-auth"
+}
 
 firewall_mode=open
 if [ "${1:-}" = --strict ]; then firewall_mode=strict; shift; fi
+
+tool="${1:-}"
+case "$tool" in
+  claude|codex|bash) shift ;;
+  ""|-h|--help) usage; exit 1 ;;
+  *) echo "Unknown tool: $tool"; usage; exit 1 ;;
+esac
 
 command -v podman >/dev/null || { echo "Podman is not installed. Run: sudo apt install -y podman uidmap passt"; exit 1; }
 [ -d "$root/.devcontainer" ] || { echo "No .devcontainer/ next to scripts/ — copy the whole template in."; exit 1; }
@@ -42,17 +61,17 @@ command -v podman >/dev/null || { echo "Podman is not installed. Run: sudo apt i
 # A terminal only when there is one, so the same script also runs from scripts and checks.
 tty=(-i); [ -t 0 ] && [ -t 1 ] && tty=(-it)
 
-# Already running: join it as the same unprivileged user rather than starting a second one.
+# Already running: start the tool in that container, as the same unprivileged user.
 # (`podman container exists` is true for a stopped one too, which would send us into a dead container.)
 if [ -n "$(podman ps --filter "name=^${name}$" --format '{{.Names}}')" ]; then
-  exec podman exec "${tty[@]}" --user 1000:1000 -w "$root" "$name" "${@:-bash}"
+  exec podman exec "${tty[@]}" --user 1000:1000 -w "$root" "$name" "$tool" "$@"
 fi
 
 echo "==> Building the image (cached after the first time)"
 podman build -q -t "$image" "$root/.devcontainer" >/dev/null
 
 mounts=(-v "$root:$root")
-for path in .git/hooks .git/config .claude .idea .vscode .devcontainer scripts/claude-container.sh; do
+for path in .git/hooks .git/config .claude .idea .vscode .devcontainer scripts/ai-container.sh; do
   if [ -e "$root/$path" ]; then
     mounts+=(-v "$root/$path:$root/$path:ro")
   fi
@@ -85,9 +104,10 @@ exec podman run --rm "${tty[@]}" \
   --sysctl net.ipv6.conf.default.disable_ipv6=1 \
   -e FIREWALL_MODE="$firewall_mode" \
   "${mounts[@]}" \
-  -v "$name-config:/home/ubuntu/.claude" \
-  -v "$name-cache:/home/ubuntu/.cache" \
+  -v "$volumes-config:/home/ubuntu/.claude" \
+  -v "$volumes-codex:/home/ubuntu/.codex" \
+  -v "$volumes-cache:/home/ubuntu/.cache" \
   -e CLAUDE_CONFIG_DIR=/home/ubuntu/.claude \
   "${git_env[@]}" \
   -w "$root" \
-  "$image" "$@"
+  "$image" "$tool" "$@"

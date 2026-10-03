@@ -1,7 +1,7 @@
-# The container Claude Code runs in. Nothing from the host comes in except the project directory
+# The container Claude Code and Codex run in. Nothing from the host comes in except the project directory
 # and Claude's memory for it — no cloud logins, no tokens, no SSH keys.
 #
-# Built and started by scripts/claude-container.sh. It starts small on purpose: what is here is what
+# Built and started by scripts/ai-container.sh. It starts small on purpose: what is here is what
 # Claude needs to work at all. Everything a particular project needs — a toolchain, a browser, a
 # database client — is an optional block further down, commented out with what it costs. Uncomment
 # what you need; the image is rebuilt once, on the next start.
@@ -69,12 +69,16 @@ ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global \
 # keep-id mapping relies on that, so files Claude writes in the project are owned by you. This runs
 # after the optional blocks, so anything root installed into the shared npm prefix is handed over.
 RUN id ubuntu \
-    && mkdir -p /usr/local/share/npm-global /home/ubuntu/.claude /home/ubuntu/.cache \
+    && mkdir -p /usr/local/share/npm-global /home/ubuntu/.claude /home/ubuntu/.codex /home/ubuntu/.cache \
     && chown -R ubuntu:ubuntu /usr/local/share/npm-global /home/ubuntu
 
 USER ubuntu
 ENV HOME=/home/ubuntu
 RUN npm install -g @anthropic-ai/claude-code
+# OpenAI's agent, started with `scripts/ai-container.sh codex`. Pinned: its flags and its login change
+# between releases. Its own sandbox works inside this container, so it runs with its defaults and
+# asks before stepping outside them.
+RUN npm install -g @openai/codex@0.160.0
 # A tool the project always needs goes here too, pinned, and as this user. For example:
 #   RUN dotnet tool install -g dotnet-ef --version 10.0.11    (then add ~/.dotnet/tools to PATH)
 

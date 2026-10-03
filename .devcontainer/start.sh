@@ -9,9 +9,10 @@ set -euo pipefail
 /usr/local/bin/init-firewall.sh
 
 # Podman creates the directories leading to a mount inside a volume, and creates them as root.
-# Claude writes its session transcripts there, so without this every write fails with EACCES.
+# Claude writes its session transcripts there, and Codex its login, so without this every write
+# fails with EACCES.
 # Only the directories themselves change owner, never their contents.
-for dir in /home/ubuntu/.claude /home/ubuntu/.claude/projects /home/ubuntu/.claude/projects/*/; do
+for dir in /home/ubuntu/.claude /home/ubuntu/.claude/projects /home/ubuntu/.claude/projects/*/ /home/ubuntu/.codex; do
   if [ -d "$dir" ] && [ ! -L "${dir%/}" ]; then chown ubuntu:ubuntu "$dir"; fi
 done
 

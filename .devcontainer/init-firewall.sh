@@ -1,10 +1,10 @@
 #!/bin/bash
-# Outbound network for the Claude Code container, in one of two modes chosen on the host:
+# Outbound network for the AI agent container, in one of two modes chosen on the host:
 #
 #   open   (default)  web traffic (HTTP/HTTPS) goes anywhere; every other port is refused.
 #   strict            only DNS, the container itself, and the hosts listed below.
 #
-# The mode comes from FIREWALL_MODE, set by scripts/claude-container.sh. That script is read-only
+# The mode comes from FIREWALL_MODE, set by scripts/ai-container.sh. That script is read-only
 # inside, so Claude cannot pick the mode for itself. If this script fails, start.sh stops and Claude
 # never starts — the container never runs without it.
 #
@@ -23,6 +23,10 @@ ALLOWED_HOSTS=(
   claude.ai
   platform.claude.com
   registry.npmjs.org
+  # Codex: the model, and signing in
+  api.openai.com
+  chatgpt.com
+  auth.openai.com
   code.claude.com
   docs.claude.com
 )
