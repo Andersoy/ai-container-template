@@ -19,14 +19,17 @@ case "$mode" in open|strict) ;; *) echo "Unknown FIREWALL_MODE: $mode"; exit 1 ;
 
 # Used by strict only. Add what the project restores from and reads.
 ALLOWED_HOSTS=(
+  # Claude Code: the model, and signing in
   api.anthropic.com
   claude.ai
   platform.claude.com
-  registry.npmjs.org
   # Codex: the model, and signing in
   api.openai.com
   chatgpt.com
   auth.openai.com
+  # Package registries the project restores from
+  registry.npmjs.org
+  # Documentation looked up while working
   code.claude.com
   docs.claude.com
 )
