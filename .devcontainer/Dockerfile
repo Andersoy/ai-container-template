@@ -69,7 +69,7 @@ ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global \
 # keep-id mapping relies on that, so files Claude writes in the project are owned by you. This runs
 # after the optional blocks, so anything root installed into the shared npm prefix is handed over.
 RUN id ubuntu \
-    && mkdir -p /usr/local/share/npm-global /home/ubuntu/.claude /home/ubuntu/.codex /home/ubuntu/.cache \
+    && mkdir -p /usr/local/share/npm-global /home/ubuntu/.claude /home/ubuntu/.codex /home/ubuntu/.cache /home/ubuntu/.npm \
     && chown -R ubuntu:ubuntu /usr/local/share/npm-global /home/ubuntu
 
 USER ubuntu

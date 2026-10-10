@@ -107,6 +107,7 @@ exec podman run --rm "${tty[@]}" \
   -v "$volumes-config:/home/ubuntu/.claude" \
   -v "$volumes-codex:/home/ubuntu/.codex" \
   -v "$volumes-cache:/home/ubuntu/.cache" \
+  -v "$volumes-npm:/home/ubuntu/.npm" \
   -e CLAUDE_CONFIG_DIR=/home/ubuntu/.claude \
   "${git_env[@]}" \
   -w "$root" \
