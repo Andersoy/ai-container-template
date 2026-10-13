@@ -41,12 +41,22 @@ image="localhost/$name"
 volumes="$name"
 
 usage() {
-  echo "Usage: scripts/ai-container.sh [--strict] <claude|codex|bash> [arguments for it]"
+  echo "Usage: scripts/ai-container.sh [--strict] [--rebuild] <claude|codex|bash> [arguments for it]"
   echo "First time with Codex: scripts/ai-container.sh codex login --device-auth"
 }
 
+# --rebuild builds the image from scratch, fetching the base image and every package anew. Without
+# it the build is cached, so Claude Code, Node and the Ubuntu packages stay at whatever versions the
+# first build got. Run it now and then, and when a security fix is out.
 firewall_mode=open
-if [ "${1:-}" = --strict ]; then firewall_mode=strict; shift; fi
+rebuild=()
+while :; do
+  case "${1:-}" in
+    --strict) firewall_mode=strict; shift ;;
+    --rebuild) rebuild=(--no-cache --pull); shift ;;
+    *) break ;;
+  esac
+done
 
 tool="${1:-}"
 case "$tool" in
@@ -56,6 +66,9 @@ case "$tool" in
 esac
 
 command -v podman >/dev/null || { echo "Podman is not installed. Run: sudo apt install -y podman uidmap passt"; exit 1; }
+# The image's user is uid 1000 and keep-id maps yours onto it; anything else gives files owned by a
+# stranger, so say so instead.
+[ "$(id -u)" = 1000 ] || { echo "This setup expects uid 1000; you are $(id -u)."; exit 1; }
 [ -d "$root/.devcontainer" ] || { echo "No .devcontainer/ next to scripts/ — copy the whole template in."; exit 1; }
 
 # A terminal only when there is one, so the same script also runs from scripts and checks.
@@ -64,14 +77,32 @@ tty=(-i); [ -t 0 ] && [ -t 1 ] && tty=(-it)
 # Already running: start the tool in that container, as the same unprivileged user.
 # (`podman container exists` is true for a stopped one too, which would send us into a dead container.)
 if [ -n "$(podman ps --filter "name=^${name}$" --format '{{.Names}}')" ]; then
+  # The firewall, the keys and the image were fixed when it started; nothing here can change them.
+  if [ "$firewall_mode" = strict ] || [ ${#rebuild[@]} -gt 0 ]; then
+    echo "Already running — --strict and --rebuild only apply when the container starts. Stop it first." >&2
+  fi
   exec podman exec "${tty[@]}" --user 1000:1000 -w "$root" "$name" "$tool" "$@"
 fi
 
 echo "==> Building the image (cached after the first time)"
-podman build -q -t "$image" "$root/.devcontainer" >/dev/null
+podman build -q "${rebuild[@]}" -t "$image" "$root/.devcontainer" >/dev/null
+
+# What the host runs on its own, read-only in here. Created first when missing: a directory that does
+# not exist cannot be mounted, and one the agent could create here is one the IDE would later run
+# from out there — a run configuration in .idea or .run, a hook, a task in .vscode.
+for dir in .claude .idea .vscode .run; do mkdir -p "$root/$dir"; done
+protected=(.git/hooks .git/config .claude .idea .vscode .run .npmrc .devcontainer scripts/ai-container.sh)
+# A hook directory of the project's own (husky and the like) runs on the host at every commit.
+hooks_path="$(git -C "$root" config core.hooksPath || true)"
+[ -n "$hooks_path" ] && [ "${hooks_path#/}" = "$hooks_path" ] && protected+=("$hooks_path")
+# IDE folders deeper in, where a sub-project was opened on its own. Only the ones that exist; the
+# root's are the ones an IDE opens by default.
+while IFS= read -r dir; do protected+=("${dir#"$root"/}"); done < <(
+  find "$root" -mindepth 2 -maxdepth 4 \( -name node_modules -o -name .git -o -name bin -o -name obj \) -prune \
+    -o -type d \( -name .idea -o -name .vscode -o -name .run \) -print)
 
 mounts=(-v "$root:$root")
-for path in .git/hooks .git/config .claude .idea .vscode .devcontainer scripts/ai-container.sh; do
+for path in "${protected[@]}"; do
   if [ -e "$root/$path" ]; then
     mounts+=(-v "$root/$path:$root/$path:ro")
   fi
@@ -91,6 +122,8 @@ git_email="$(git -C "$root" config user.email || true)"
 [ -n "$git_name" ] && git_env+=(-e "GIT_AUTHOR_NAME=$git_name" -e "GIT_COMMITTER_NAME=$git_name")
 [ -n "$git_email" ] && git_env+=(-e "GIT_AUTHOR_EMAIL=$git_email" -e "GIT_COMMITTER_EMAIL=$git_email")
 
+# --memory and --pids-limit cap what a runaway build, test or loop can take from the machine (or from
+# WSL, where it would take everything else in WSL down with it). Raise them here if a project needs more.
 # --user 0 only for start.sh, which raises the firewall and then drops to your uid for good.
 # keep-id maps your uid to the same number inside, so files written here are owned by you.
 exec podman run --rm "${tty[@]}" \
@@ -100,6 +133,7 @@ exec podman run --rm "${tty[@]}" \
   --user 0:0 \
   --cap-add=NET_ADMIN --cap-add=NET_RAW \
   --security-opt=no-new-privileges \
+  --memory 8g --pids-limit 4096 \
   --sysctl net.ipv6.conf.all.disable_ipv6=1 \
   --sysctl net.ipv6.conf.default.disable_ipv6=1 \
   -e FIREWALL_MODE="$firewall_mode" \

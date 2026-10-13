@@ -24,7 +24,15 @@ scripts/ai-container.sh claude             # Claude Code, web traffic open
 scripts/ai-container.sh codex              # OpenAI Codex
 scripts/ai-container.sh bash               # a shell
 scripts/ai-container.sh --strict claude    # any of them, with only the hosts in init-firewall.sh
+scripts/ai-container.sh --rebuild claude   # rebuild the image from scratch first
 ```
+
+**Rebuild now and then.** The image is cached, so Claude Code, Node and the Ubuntu packages stay at
+the versions the first build got until the Dockerfile changes. `--rebuild` fetches the base image and
+every package anew; run it every month or so, and when a security fix is out.
+
+`--strict` and `--rebuild` only apply when the container starts. If it is already running, the tool
+joins it as it is, and the launcher says so — stop it first.
 
 **Signing in.** Claude asks the first time, and the login is remembered. Codex needs one step of its
 own, once: `scripts/ai-container.sh codex login --device-auth`. Its ordinary login sends the browser
@@ -45,11 +53,27 @@ machine.
 
 **It protects:** everything outside the project directory. No cloud logins, tokens, SSH keys or
 other projects are mounted in; there is no `sudo`, no capabilities and `no_new_privs`; and the paths
-the *host* runs code from are read-only inside — `.git/hooks`, `.git/config`, `.claude`, `.idea`,
-`.vscode`, `.devcontainer` and the launcher itself.
+the *host* runs code from are read-only inside:
+
+| Path | Why the host runs it |
+| --- | --- |
+| `.git/hooks`, `.git/config`, and `core.hooksPath` if the project sets one (`.husky`) | git runs hooks at every commit, and the config can point it at other programs |
+| `.claude` | Claude Code runs its hooks on the host too |
+| `.idea`, `.run`, `.vscode` — at the root, and any found deeper in | the IDE's run configurations and tasks |
+| `.npmrc` | can make every `npm` command load a script first |
+| `.devcontainer`, the launcher | so the container cannot loosen itself |
+
+The four directories are created when missing, before the container starts. A directory that does
+not exist cannot be mounted, and one the agent could create in a fresh clone is one Rider would
+later run from on the host.
+
+The container is capped at 8 GB of memory and 4,096 processes, so a runaway build or loop cannot take
+the machine — or, under WSL, everything else in WSL — down with it. The setup expects your uid to be
+1000, as the image's user is; the launcher stops with a plain message if it is not.
 
 **It does not protect:** the project itself. The agent can change or delete anything in it, so
-commit often. Nor does it protect against code you then run on the host — read the diff first.
+commit often. Nor does it protect against code you then run on the host — `package.json` scripts,
+build files, anything `npm run dev` or a build will execute — so read the diff first.
 
 **Network.** Open by default: HTTP and HTTPS to the internet, every other port refused, and the home
 network (private addresses) refused too, so the router and printers stay out of reach. IPv6 is off
@@ -82,6 +106,11 @@ firewall are read-only inside, so the agent cannot change either.
 - **Build output:** if the host and the container both build the project, they may write different
   absolute paths into the build folder and undo each other's work. Point the container's output
   somewhere of its own (in .NET, a `Directory.Build.props` keyed on `DOTNET_RUNNING_IN_CONTAINER`).
+- **A company network** that inspects encrypted traffic needs its root certificate in the image; the
+  Dockerfile has a commented block for it. A proxy on a port other than 80 or 443 must be let through
+  in `init-firewall.sh`.
+- **WSL2** is untested. Podman, the firewall and AppArmor behave differently there; on a first start,
+  run the same checks as on Ubuntu (firewall up, files owned by you, protected paths read-only).
 - **API keys** for the project's own calls: pass them in with `-e NAME` from a file outside the
   project, and use keys with a low spend limit — with the web open, a key inside the container is a
   key that can leave. Never `ANTHROPIC_API_KEY`, which Claude Code would take for its own

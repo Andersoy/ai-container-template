@@ -28,6 +28,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# A company network that inspects encrypted traffic re-signs it with its own root certificate, and
+# npm, Claude Code and Playwright then fail with "self-signed certificate in certificate chain". Put
+# the certificate in .devcontainer/ and uncomment. Node keeps its own list of authorities, so it needs
+# NODE_EXTRA_CA_CERTS as well as the system store. A proxy on a port other than 80 or 443 also needs
+# letting through in init-firewall.sh.
+# COPY company-root.crt /usr/local/share/ca-certificates/company-root.crt
+# RUN update-ca-certificates
+# ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/company-root.crt
+
 # Where every globally installed npm package goes, set before the first one is installed: npm's own
 # default for root is elsewhere (/usr/lib/node_modules with this Node), and a package there is
 # invisible to `npx`, which resolves through this prefix — so `npx <tool>` would quietly download the
