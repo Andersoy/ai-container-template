@@ -19,11 +19,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 # an ordinary user with no way back to root — so it cannot take the firewall down again.
 #
 # python3 and the network tools are not optional: the firewall script uses dig, iptables and ip, and
-# Claude Code's hooks are commonly shell and Python.
+# Claude Code's hooks are commonly shell and Python. Nor are bubblewrap and socat: the launcher starts
+# Claude with its own sandbox around each command, and on Linux that sandbox is built from these two.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg git less procps jq zip unzip ripgrep \
       iptables iproute2 dnsutils \
-      python3 \
+      python3 bubblewrap socat \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -77,8 +78,12 @@ ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global \
 # The image's ordinary user is `ubuntu`, uid 1000 — the same number as yours on the host. Podman's
 # keep-id mapping relies on that, so files Claude writes in the project are owned by you. This runs
 # after the optional blocks, so anything root installed into the shared npm prefix is handed over.
+# The folders on the second line are where Claude's own sandbox lets commands write (sandbox_writable
+# in the launcher). The sandbox can only open folders that exist — it cannot create one in a home
+# directory it keeps read-only — so they are made here, empty, whether or not a project uses them.
 RUN id ubuntu \
     && mkdir -p /usr/local/share/npm-global /home/ubuntu/.claude /home/ubuntu/.codex /home/ubuntu/.cache /home/ubuntu/.npm \
+       /home/ubuntu/.nuget /home/ubuntu/.dotnet /home/ubuntu/.templateengine /home/ubuntu/.local/share/NuGet \
     && chown -R ubuntu:ubuntu /usr/local/share/npm-global /home/ubuntu
 
 USER ubuntu

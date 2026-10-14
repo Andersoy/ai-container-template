@@ -1,0 +1,27 @@
+# Standard .gitignore for a project run with the ai-container. Offered by scripts/ai-container.sh
+# when a project has none. Remove what does not fit: in a team project .run/ is often shared on
+# purpose, and notes/ may be meant for everyone.
+
+# IDE and editor settings — personal
+.idea/
+.vscode/
+.run/
+
+# Personal Claude Code settings for this project. The rest of .claude/ (settings.json, hooks) is shared.
+.claude/settings.local.json
+
+# Private planning notes
+notes/
+
+# Dependencies, downloaded again by npm
+node_modules/
+
+# .NET build output, the container's included (obj/container/, bin/container/)
+bin/
+obj/
+
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+*.local

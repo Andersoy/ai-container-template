@@ -76,6 +76,12 @@ iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT DROP
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+# Ports the launcher published, so a dev server in here can be reached from this machine's browser.
+# Podman binds them to 127.0.0.1 on the host, so nothing else on the network reaches them.
+for port in ${PUBLISHED_PORTS:-}; do
+  [[ "$port" =~ ^[0-9]+$ ]] || { echo "Not a port number: $port"; exit 1; }
+  iptables -A INPUT -p tcp --dport "$port" -j ACCEPT
+done
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -j ALLOWED
 # Rejected rather than dropped, so a blocked request fails at once instead of hanging.
