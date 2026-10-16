@@ -129,7 +129,12 @@ firewall are read-only inside, so the agent cannot change either.
   installs during a session is gone next time, so what the project always needs belongs here.
 - **A .NET project:** swap the base image for `mcr.microsoft.com/dotnet/sdk:10.0-noble`, which
   carries the SDK and sets `DOTNET_RUNNING_IN_CONTAINER`. Add `dotnet-ef` as its own pinned line,
-  and a volume for `~/.nuget` in the launcher.
+  and a volume for `~/.nuget` in the launcher. Tell Claude, in the project's CLAUDE.md, to build and
+  test with `-m:1` (`dotnet build -m:1`): MSBuild's worker processes talk over sockets Claude's
+  sandbox refuses, and the build then fails with `Build FAILED` and `0 Error(s)` — a known limit of
+  the sandbox (anthropics/claude-code#39257, closed without a fix). One process needs no sockets. A
+  shell from `scripts/ai-container.sh bash` is not affected. Run the API with `--urls
+  http://0.0.0.0:<port>` to reach it from the host: `launchSettings.json` binds to localhost.
 - **Pin what you add**, and keep a pinned tool in step with the project's own version of it — a
   Playwright browser build that does not match the library is refused, and so is a mismatched
   `dotnet-ef`.
