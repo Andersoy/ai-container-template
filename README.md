@@ -39,7 +39,12 @@ the versions the first build got until the Dockerfile changes. `--rebuild` fetch
 every package anew; run it every month or so, and when a security fix is out.
 
 `--strict`, `--rebuild` and `--port` only apply when the container starts. If it is already running,
-the tool joins it as it is, and the launcher says so — stop it first.
+the launcher stops with a message rather than join it without what you asked for — stop it first.
+
+**Versions.** Claude Code and Codex are installed at their newest release when the image is built,
+and kept there: Claude is told not to update itself and Codex not to check. An update made inside
+would last only until the container stops. `--rebuild` is how they move on. Pin one in the Dockerfile
+(`@x.y.z`) only if a release breaks something.
 
 **Run dev servers in here, not on the host.** `npm install` and `npm run dev` execute the code in
 every package; inside the container that code meets the container's walls, on the host it runs with
@@ -47,7 +52,10 @@ your rights. Ports are what make that workable: list the project's in `ports=(..
 the launcher (they come ticked in the menu), or give `--port`. They are published to `127.0.0.1`
 only — your browser reaches them, nothing else on the network does. The dev server must listen on
 all addresses in the container: Next.js does by default; Vite and Sanity Studio need `--host`. Two
-containers running at once cannot both have the same port.
+containers running at once cannot both have the same port. Start them from a shell
+(`scripts/ai-container.sh bash`), not through Claude: Claude's sandbox gives each command a network
+of its own, so a server it starts cannot be reached from your browser, nor from Claude's next
+command — a server and the check against it (Playwright, curl) go in one command.
 
 **Signing in.** Claude asks the first time, and the login is remembered. Codex needs one step of its
 own, once: `scripts/ai-container.sh codex login --device-auth`. Its ordinary login sends the browser
@@ -69,9 +77,7 @@ refused without asking. Claude's own web search and fetch are not shell commands
 affected. In a container the sandbox needs `enableWeakerNestedSandbox`, which lets a sandboxed
 command see the container's other processes; the container is the boundary that matters. The
 folders in `sandbox_writable` must also exist in the image — the sandbox cannot create them — so the
-two lists are kept in step. On an Ubuntu host it would not: its sandbox needs unprivileged user namespaces, which
-Ubuntu's AppArmor restricts, and its read-only mode blocks writing but not reading the rest of the
-machine.
+two lists are kept in step.
 
 ## What it protects, and what it does not
 
@@ -83,11 +89,12 @@ the *host* runs code from are read-only inside:
 | --- | --- |
 | `.git/hooks`, `.git/config`, and `core.hooksPath` if the project sets one (`.husky`) | git runs hooks at every commit, and the config can point it at other programs |
 | `.claude` | Claude Code runs its hooks on the host too |
+| `.mcp.json`, `.codex` | name programs a Claude or Codex session on the host would start. `.mcp.json` only when it exists; a new one still needs your approval on the host |
 | `.idea`, `.run`, `.vscode` — at the root, and any found deeper in | the IDE's run configurations and tasks |
 | `.npmrc` | can make every `npm` command load a script first |
 | `.devcontainer`, the launcher | so the container cannot loosen itself |
 
-The four directories are created when missing, before the container starts. A directory that does
+The five directories are created when missing, before the container starts. A directory that does
 not exist cannot be mounted, and one the agent could create in a fresh clone is one Rider would
 later run from on the host.
 
@@ -104,7 +111,12 @@ network (private addresses) refused too, so the router and printers stay out of 
 in both modes, so it cannot route round the rules, and DNS goes only to the container's own
 resolvers. `--strict` allows a listed handful of hosts instead — an allowlist worth having when a
 session should run unwatched, since with the web open a page the agent reads could carry
-instructions to send the project somewhere. The mode is chosen on the host; the launcher and
+instructions to send the project somewhere. It is a list of addresses, looked up once at start:
+another site sharing an address with a listed host is reachable too.
+
+**Pushing.** No SSH key or git credential is mounted, so the agents can commit but not push. That is
+the absence of a login, not a block on GitHub: a token pasted into the session would work. Claude's
+own sandbox adds a wall for its commands, since GitHub is not in `sandbox_domains`. The mode is chosen on the host; the launcher and
 firewall are read-only inside, so the agent cannot change either.
 
 ## Fit it to the project

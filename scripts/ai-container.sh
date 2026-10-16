@@ -22,11 +22,15 @@
 # What it cannot:
 #   - your cloud logins, tokens, SSH keys, or anything else in your home directory
 #   - other projects, or other processes on this machine
-#   - pushing — you review and push from the host
+#   - pushing, as long as no login is in here: no SSH key or git credential is mounted, so the
+#     agents can commit but not push, and you review and push from the host. Claude's own sandbox
+#     also lets its commands reach only sandbox_domains, which leaves out GitHub. Neither is a wall
+#     against a token pasted into the session.
 #
 # Read-only inside, even though the rest of the project is writable: every path the host runs on its
 # own. Git runs .git/hooks, and .git/config can point it at other programs; .claude holds hooks
-# Claude Code runs; .idea and .vscode hold run configurations. A change there would run on the host
+# Claude Code runs; .idea and .vscode hold run configurations; .mcp.json and .codex name programs a
+# Claude or Codex session on the host would start. A change there would run on the host
 # with all your credentials. The container's own definition is read-only for the same reason: it
 # must not be able to loosen itself.
 #
@@ -165,6 +169,8 @@ fi
 # from this read-only script, so it can be neither weakened from inside nor leak into host sessions,
 # as a setting in .claude/ would. failIfUnavailable: no sandbox, no start, rather than none in silence.
 tool_cmd=("$tool")
+# Codex: no update check at start. The image decides its version (see the Dockerfile).
+[ "$tool" = codex ] && tool_cmd=(codex -c check_for_update_on_startup=false)
 if [ "$tool" = claude ]; then
   domains="$(printf '"%s",' "${sandbox_domains[@]}")"
   writable="$(printf '"%s",' "${sandbox_writable[@]}")"
@@ -172,9 +178,12 @@ if [ "$tool" = claude ]; then
 fi
 
 if $running; then
-  # The firewall, the ports, the keys and the image were fixed when it started; nothing here changes them.
+  # The firewall, the ports, the keys and the image were fixed when it started; nothing here changes
+  # them. Asked for and not possible is a stop, not a warning: --strict above all, since carrying on
+  # would give open network to someone who asked for it shut.
   if [ "$firewall_mode" = strict ] || [ ${#rebuild[@]} -gt 0 ] || $port_flag; then
     echo "Already running — --strict, --rebuild and --port only apply when the container starts. Stop it first." >&2
+    exit 1
   fi
   exec podman exec "${tty[@]}" --user 1000:1000 -w "$root" "$name" "${tool_cmd[@]}" "$@"
 fi
@@ -185,8 +194,10 @@ podman build -q "${rebuild[@]}" -t "$image" "$root/.devcontainer" >/dev/null
 # What the host runs on its own, read-only in here. Created first when missing: a directory that does
 # not exist cannot be mounted, and one the agent could create here is one the IDE would later run
 # from out there — a run configuration in .idea or .run, a hook, a task in .vscode.
-for dir in .claude .idea .vscode .run; do mkdir -p "$root/$dir"; done
-protected=(.git/hooks .git/config .claude .idea .vscode .run .npmrc .devcontainer scripts/ai-container.sh)
+# .mcp.json is a file and is protected only when it exists; a new one made in here still needs your
+# approval in a host session before Claude starts what it names.
+for dir in .claude .codex .idea .vscode .run; do mkdir -p "$root/$dir"; done
+protected=(.git/hooks .git/config .claude .codex .mcp.json .idea .vscode .run .npmrc .devcontainer scripts/ai-container.sh)
 # A hook directory of the project's own (husky and the like) runs on the host at every commit.
 hooks_path="$(git -C "$root" config core.hooksPath || true)"
 [ -n "$hooks_path" ] && [ "${hooks_path#/}" = "$hooks_path" ] && protected+=("$hooks_path")

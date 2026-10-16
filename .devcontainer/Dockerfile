@@ -88,11 +88,16 @@ RUN id ubuntu \
 
 USER ubuntu
 ENV HOME=/home/ubuntu
+# The two agents, at the newest release when the image is built. The image decides the version: Claude
+# is told not to update itself (DISABLE_UPDATES), and the launcher tells Codex not to check. An update
+# made inside would live only until the container stops, so two sessions could run different versions.
+# --rebuild is how they move on. If a release ever breaks the launcher, pin it here (@x.y.z) until
+# the launcher is fixed.
+ENV DISABLE_UPDATES=1
 RUN npm install -g @anthropic-ai/claude-code
-# OpenAI's agent, started with `scripts/ai-container.sh codex`. Pinned: its flags and its login change
-# between releases. Its own sandbox works inside this container, so it runs with its defaults and
-# asks before stepping outside them.
-RUN npm install -g @openai/codex@0.160.0
+# OpenAI's agent, started with `scripts/ai-container.sh codex`. Its own sandbox works inside this
+# container, so it runs with its defaults and asks before stepping outside them.
+RUN npm install -g @openai/codex
 # A tool the project always needs goes here too, pinned, and as this user. For example:
 #   RUN dotnet tool install -g dotnet-ef --version 10.0.11    (then add ~/.dotnet/tools to PATH)
 

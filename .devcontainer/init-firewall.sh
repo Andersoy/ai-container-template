@@ -18,6 +18,9 @@ mode="${FIREWALL_MODE:-open}"
 case "$mode" in open|strict) ;; *) echo "Unknown FIREWALL_MODE: $mode"; exit 1 ;; esac
 
 # Used by strict only. Add what the project restores from and reads.
+# Each host is looked up once, at start, and its IPv4 addresses let through on any port. That makes
+# strict an allowlist of addresses, not of names: another site on the same address (a CDN) is reached
+# too, and a host that moves to a new address is blocked until the container starts again.
 ALLOWED_HOSTS=(
   # Claude Code: the model, and signing in
   api.anthropic.com
@@ -78,7 +81,9 @@ iptables -P OUTPUT DROP
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 # Ports the launcher published, so a dev server in here can be reached from this machine's browser.
 # Podman binds them to 127.0.0.1 on the host, so nothing else on the network reaches them.
-for port in ${PUBLISHED_PORTS:-}; do
+# Split on spaces here: IFS above splits only on newlines and tabs.
+IFS=' ' read -r -a published <<< "${PUBLISHED_PORTS:-}"
+for port in "${published[@]}"; do
   [[ "$port" =~ ^[0-9]+$ ]] || { echo "Not a port number: $port"; exit 1; }
   iptables -A INPUT -p tcp --dport "$port" -j ACCEPT
 done
