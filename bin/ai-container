@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+# Starts an AI coding agent inside a container, so a mistaken command cannot reach beyond the project.
+# Run it from anywhere inside a project that has .devcontainer/ai-container.conf:
+#
+#   ai-container                     # menus: tool, network, ports, rebuild
+#   ai-container claude              # Claude Code
+#   ai-container codex               # OpenAI Codex
+#   ai-container bash                # a shell, to look around
+#   ai-container --strict claude     # any of them, with only the allowed hosts reachable
+#   ai-container init [--dotnet]     # set up the project in this folder
+#
+# Anything after the tool goes to it: `ai-container codex login --device-auth` signs Codex in, which is
+# needed once — its ordinary login sends the browser back to an address inside the container, which
+# the host cannot reach. If the container is already running, the tool starts in that one rather than
+# a second, so Claude and Codex can work side by side.
+#
+# This script lives in the template, installed once per machine, not in the projects: a fix here
+# reaches every project with a `git pull`. What differs between projects is in each project's
+# .devcontainer/ai-container.conf, read as data and checked value by value, never run.
+#
+# The container lives exactly as long as the program it was started with, and is deleted when that
+# ends. Only the project, Claude's memory, the logins and the caches carry over; anything installed
+# during a session is gone next time, so a tool the project always needs belongs in the image.
+#
+# What the container can reach:
+#   - the project, at the same path as on the host, so Claude's memory for it still lines up
+#   - the web, or with --strict only the allowed hosts
+# What it cannot:
+#   - your cloud logins, tokens, SSH keys, or anything else in your home directory
+#   - other projects, this template, or other processes on this machine
+#   - pushing, as long as no login is in here: no SSH key or git credential is mounted, so the
+#     agents can commit but not push, and you review and push from the host. Claude's own sandbox
+#     also lets its commands reach only sandbox_domains, which leaves out GitHub. Neither is a wall
+#     against a token pasted into the session.
+#
+# Read-only inside, even though the rest of the project is writable: every path the host runs on its
+# own. Git runs .git/hooks, and .git/config can point it at other programs; .claude holds hooks
+# Claude Code runs; .idea and .vscode hold run configurations; .mcp.json and .codex name programs a
+# Claude or Codex session on the host would start. A change there would run on the host with all
+# your credentials. The project's .devcontainer is read-only for the same reason: the container must
+# not be able to loosen its own settings.
+#
+# One limit no mount fixes: the project is shared, and building or running it on the host runs its
+# code there. Read the diff before you run anything on the host — scripts included.
+set -euo pipefail
+
+# The template this script belongs to, found through the link setup-host.sh puts on PATH.
+template="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+usage() {
+  echo "Usage: ai-container                       (menus)"
+  echo "       ai-container [--strict] [--rebuild] [--port N]... <claude|codex|bash> [arguments for it]"
+  echo "       ai-container init [--dotnet]       (set up the project in this folder)"
+  echo "First time with Codex: ai-container codex login --device-auth"
+}
+
+# --- init: a new project ------------------------------------------------------------------------
+if [ "${1:-}" = init ]; then
+  base=ubuntu:24.04
+  case "${2:-}" in
+    --dotnet) base=mcr.microsoft.com/dotnet/sdk:10.0-noble ;;
+    "") ;;
+    *) usage; exit 1 ;;
+  esac
+  conf="$PWD/.devcontainer/ai-container.conf"
+  [ -e "$conf" ] && { echo "$conf exists already."; exit 1; }
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$top" ] && [ "$top" != "$PWD" ]; then
+    echo "This folder is inside the git repository $top — run ai-container init there."; exit 1
+  fi
+  mkdir -p "$PWD/.devcontainer"
+  sed "s#^base_image = .*#base_image = $base#" "$template/templates/ai-container.conf" > "$conf"
+  echo "==> Wrote .devcontainer/ai-container.conf (base image $base)"
+  if [ ! -e "$PWD/.gitignore" ]; then
+    cp "$template/templates/project.gitignore" "$PWD/.gitignore"
+    echo "==> Added .gitignore (the template's standard one; edit as you like)"
+  fi
+  echo "Fill in ai-container.conf — the comments say what each line does — then start with: ai-container"
+  [ "$base" = ubuntu:24.04 ] || echo "For .NET, see \"A .NET project\" in $template/README.md."
+  exit 0
+fi
+
+# --- The project and its settings ----------------------------------------------------------------
+# The nearest folder upward with .devcontainer/ai-container.conf, so it starts from any subfolder.
+root="$PWD"
+while [ ! -f "$root/.devcontainer/ai-container.conf" ]; do
+  if [ "$root" = / ]; then
+    if [ -x "$PWD/scripts/ai-container.sh" ]; then
+      echo "This project still has its own launcher: run scripts/ai-container.sh, or move it to ai-container.conf."
+    else
+      echo "No .devcontainer/ai-container.conf here or above. In the project's root folder, run: ai-container init"
+    fi
+    exit 1
+  fi
+  root="$(dirname "$root")"
+done
+project="$(basename "$root")"
+name="ai-${project//[^a-zA-Z0-9_.-]/-}"
+image="localhost/$name"
+conf="$root/.devcontainer/ai-container.conf"
+
+# Read as data, one `name = value` per line: nothing in the file is ever run. Each value must match
+# what that setting allows, and anything else stops here, with the line that failed.
+conf_format=""
+base_image=ubuntu:24.04
+apt_packages=()
+ports=()
+project_domains=()
+strict_hosts=()
+agent_keys=()
+volumes=""
+agent_env_file=""
+declare -A seen=()
+lineno=0
+conf_error() {
+  if [ "$lineno" -gt 0 ]; then echo "$conf, line $lineno: $1" >&2; else echo "$conf: $1" >&2; fi
+  exit 1
+}
+one() { [ ${#values[@]} -eq 1 ] || conf_error "$key takes one value"; }
+allow() {  # $1: the pattern every value must match
+  local pattern="$1" value
+  for value in "${values[@]}"; do [[ "$value" =~ $pattern ]] || conf_error "$key: not allowed: $value"; done
+}
+while IFS= read -r line || [ -n "$line" ]; do
+  lineno=$((lineno + 1))
+  line="${line%%#*}"
+  [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+  [[ "$line" =~ ^[[:space:]]*([a-z_]+)[[:space:]]*=(.*)$ ]] || conf_error "expected name = value"
+  key="${BASH_REMATCH[1]}"
+  read -r -a values <<< "${BASH_REMATCH[2]}"
+  [ -z "${seen[$key]:-}" ] || conf_error "$key is set twice"
+  seen[$key]=1
+  case "$key" in
+    format)          one; conf_format="${values[0]}" ;;
+    base_image)      one; allow '^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'
+                     base_image="${values[0]}" ;;
+    apt_packages)    allow '^[a-z0-9][a-z0-9.+-]*$'; apt_packages=("${values[@]}") ;;
+    ports)           allow '^[0-9]{1,5}$'; ports=("${values[@]}") ;;
+    sandbox_domains) allow '^(\*\.)?([a-z0-9-]+\.)+[a-z0-9-]+$'; project_domains=("${values[@]}") ;;
+    strict_hosts)    allow '^([a-z0-9-]+\.)+[a-z0-9-]+$'; strict_hosts=("${values[@]}") ;;
+    agent_keys)      allow '^[A-Za-z_][A-Za-z0-9_]*$'
+                     for value in "${values[@]}"; do
+                       case "$value" in ANTHROPIC_API_KEY|OPENAI_API_KEY)
+                         conf_error "$value would be taken by Claude Code or Codex for their own conversations" ;;
+                       esac
+                     done
+                     agent_keys=("${values[@]}") ;;
+    # Kept for projects set up before this file existed, so their logins and key file stay where
+    # they are. A new project leaves both out.
+    volumes)         one; allow '^[a-zA-Z0-9][a-zA-Z0-9_.-]*$'; volumes="${values[0]}" ;;
+    agent_env_file)  one; allow '^~/\.config/[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*$'
+                     agent_env_file="$HOME/${values[0]#\~/}" ;;
+    *)               conf_error "unknown setting: $key" ;;
+  esac
+done < "$conf"
+lineno=0
+[ "$conf_format" = 1 ] || conf_error "needs format = 1 (this template reads format 1)"
+
+# Named volumes holding the logins, Claude's sessions and the caches. Changing this starts them over.
+volumes="${volumes:-$name}"
+# Hosts Claude's own sandbox lets its shell commands reach — npm, dotnet restore, curl. Its own web
+# tools (search, fetch) are outside the sandbox and reach what the container's firewall allows. A
+# host not on the list is refused without asking. Every project gets the package registries and the
+# hosts NuGet checks signing certificates against (unreachable, it skips the check without saying
+# so; older packages carry Symantec timestamp certificates); the project adds its own.
+sandbox_domains=(registry.npmjs.org api.nuget.org
+  crl3.digicert.com crl4.digicert.com ocsp.digicert.com
+  ts-crl.ws.symantec.com ts-ocsp.ws.symantec.com s.symcb.com s.symcd.com
+  "${project_domains[@]}")
+# Where those commands may write besides the project: the package caches. They live only in this
+# container's volumes, not on the host.
+# They must also exist in the image (the mkdir in image/Dockerfile): the sandbox can only open
+# folders that are there. Keep the two lists in step.
+sandbox_writable=("~/.npm" "~/.nuget" "~/.local/share/NuGet" "~/.dotnet" "~/.templateengine" "~/.cache")
+# Days after the last --rebuild before the launcher recommends another. Security fixes reach the image
+# only through a rebuild from scratch, so this is how long it may go without them.
+rebuild_after_days=14
+
+# --- Arguments and menus ------------------------------------------------------------------------
+# --rebuild builds the image from scratch, fetching the base image and every package anew. Without
+# it the build is cached, so Claude Code, Node and the Ubuntu packages stay at whatever versions the
+# last rebuild got. Run it now and then, and when a security fix is out.
+firewall_mode=open
+rebuild=false
+published=()
+port_flag=false
+# Menus when started with nothing after it, in a terminal, and whiptail is there (it is on Ubuntu).
+interactive=false
+if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ] && command -v whiptail >/dev/null; then interactive=true; fi
+$interactive || published=("${ports[@]}")
+while :; do
+  case "${1:-}" in
+    --strict) firewall_mode=strict; shift ;;
+    --rebuild) rebuild=true; shift ;;
+    --port)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] || { echo "--port needs a port number"; usage; exit 1; }
+      published+=("$2"); port_flag=true; shift 2 ;;
+    *) break ;;
+  esac
+done
+
+tool=""
+if ! $interactive; then
+  tool="${1:-}"
+  case "$tool" in
+    claude|codex|bash) shift ;;
+    ""|-h|--help) usage; exit 1 ;;
+    *) echo "Unknown tool: $tool"; usage; exit 1 ;;
+  esac
+fi
+
+command -v podman >/dev/null || { echo "Podman is not installed. Run: $template/setup-host.sh"; exit 1; }
+# The image's user is uid 1000 and keep-id maps yours onto it; anything else gives files owned by a
+# stranger, so say so instead.
+[ "$(id -u)" = 1000 ] || { echo "This setup expects uid 1000; you are $(id -u)."; exit 1; }
+
+# A project with no .gitignore is offered the standard one, once. "No" is remembered outside the
+# project, so the question does not come back; Esc just skips it this time.
+gitignore_declined="${XDG_CACHE_HOME:-$HOME/.cache}/ai-container/gitignore-declined-$(printf '%s' "$root" | sha1sum | cut -c1-12)"
+if [ ! -e "$root/.gitignore" ] && [ ! -e "$gitignore_declined" ]; then
+  if [ -t 0 ] && [ -t 1 ] && command -v whiptail >/dev/null; then
+    answer=0
+    whiptail --title "AI container — $project" --yesno "This project has no .gitignore.\n\nAdd the standard one? It keeps IDE settings, personal Claude settings, notes/, node_modules/, build output and local env files out of git. You can edit it afterwards.\n\nNo is remembered for this project." 15 74 || answer=$?
+    case $answer in
+      0) cp "$template/templates/project.gitignore" "$root/.gitignore"; echo "==> Added .gitignore" ;;
+      1) mkdir -p "$(dirname "$gitignore_declined")"; : > "$gitignore_declined" ;;
+    esac
+  else
+    echo "Note: this project has no .gitignore; a standard one is in $template/templates/project.gitignore" >&2
+  fi
+fi
+
+# A terminal only when there is one, so the same script also runs from scripts and checks.
+tty=(-i); [ -t 0 ] && [ -t 1 ] && tty=(-it)
+
+# Already running: start the tool in that container, as the same unprivileged user.
+# (`podman container exists` is true for a stopped one too, which would send us into a dead container.)
+running=false
+[ -n "$(podman ps --filter "name=^${name}$" --format '{{.Names}}')" ] && running=true
+
+# How old the image's packages are, counted from the last --rebuild, which this script records. Not
+# from the image's own creation time: a Dockerfile change resets that, while the steps above the
+# change — the base image and its packages — stay as old as they were. No image yet: the first
+# build fetches everything anew, so it starts with a known date.
+rebuilt_stamp="${XDG_CACHE_HOME:-$HOME/.cache}/ai-container/rebuilt-$name"
+image_exists=false
+age_note=""
+if ! $running; then
+  if podman image exists "$image"; then
+    image_exists=true
+    if rebuilt="$(cat "$rebuilt_stamp" 2>/dev/null)" && [[ "$rebuilt" =~ ^[0-9]+$ ]]; then
+      days=$(( ($(date +%s) - rebuilt) / 86400 ))
+      [ "$days" -ge "$rebuild_after_days" ] && age_note="The image was last rebuilt $days days ago."
+    else
+      age_note="The image has no recorded rebuild, so its packages may be old."
+    fi
+  else
+    rebuild=true
+  fi
+fi
+
+if $interactive; then
+  title="AI container — $project"
+  ask() { whiptail --title "$title" "$@" 3>&1 1>&2 2>&3; }
+  if $running; then
+    note="The container is already running. Network, ports and image were fixed when it started; to change them, stop it first."
+  else
+    note="Choose the tool to start."
+  fi
+  tool="$(ask --menu "$note" 14 74 3 \
+    claude "Claude Code" codex "OpenAI Codex" bash "A shell")" || { echo "Cancelled."; exit 0; }
+  if ! $running; then
+    firewall_mode="$(ask --default-item open --menu "Network" 13 74 2 \
+      open   "Web open; home network, other ports and IPv6 shut" \
+      strict "Only the agents' hosts, the registries and strict_hosts")" || { echo "Cancelled."; exit 0; }
+    if [ ${#ports[@]} -gt 0 ]; then
+      items=(); for port in "${ports[@]}"; do items+=("$port" "localhost:$port" ON); done
+      choice="$(ask --separate-output --checklist \
+        "Ports to open to this machine, for dev servers (space toggles)" 15 74 6 "${items[@]}")" \
+        || { echo "Cancelled."; exit 0; }
+      while IFS= read -r port; do [ -n "$port" ] && published+=("$port"); done <<< "$choice"
+    fi
+    extra="$(ask --inputbox "Other ports to open, separated by spaces (leave empty for none)" 9 74 "")" \
+      || { echo "Cancelled."; exit 0; }
+    for port in $extra; do
+      [[ "$port" =~ ^[0-9]+$ ]] || { echo "Not a port number: $port"; exit 1; }
+      published+=("$port")
+    done
+    if $image_exists; then
+      # Yes is the default once the image is past rebuild_after_days, so the safe answer is one keypress.
+      default=(--defaultno); [ -n "$age_note" ] && default=()
+      if ask "${default[@]}" --yesno "${age_note:+$age_note\n\n}Rebuild the image from scratch?\n\nFetches the base image and every package anew — worth doing every couple of weeks and after a security fix. Takes a few minutes." 14 74; then
+        rebuild=true
+      fi
+    fi
+  fi
+fi
+# Without menus: a warning, never a stop.
+if ! $interactive && ! $rebuild && [ -n "$age_note" ]; then
+  echo "Note: $age_note Start with --rebuild to fetch the base image and packages anew." >&2
+fi
+
+# Claude Code's own sandbox, around each command it runs, inside this container's walls. In here it
+# has to use the container's /proc (enableWeakerNestedSandbox), which lets a sandboxed command see the
+# container's other processes; the container is the boundary that matters. Given on the command line
+# from this script, outside the project, so it can be neither weakened from inside nor leak into host
+# sessions, as a setting in .claude/ would. failIfUnavailable: no sandbox, no start, rather than none
+# in silence.
+tool_cmd=("$tool")
+# Codex: no update check at start. The image decides its version (see image/Dockerfile).
+[ "$tool" = codex ] && tool_cmd=(codex -c check_for_update_on_startup=false)
+if [ "$tool" = claude ]; then
+  domains="$(printf '"%s",' "${sandbox_domains[@]}")"
+  writable="$(printf '"%s",' "${sandbox_writable[@]}")"
+  tool_cmd=(claude --settings "{\"sandbox\":{\"enabled\":true,\"enableWeakerNestedSandbox\":true,\"failIfUnavailable\":true,\"network\":{\"allowedDomains\":[${domains%,}]},\"filesystem\":{\"allowWrite\":[${writable%,}]}}}")
+fi
+
+if $running; then
+  # The firewall, the ports, the keys and the image were fixed when it started; nothing here changes
+  # them. Asked for and not possible is a stop, not a warning: --strict above all, since carrying on
+  # would give open network to someone who asked for it shut.
+  if [ "$firewall_mode" = strict ] || $rebuild || $port_flag; then
+    echo "Already running — --strict, --rebuild and --port only apply when the container starts. Stop it first." >&2
+    exit 1
+  fi
+  exec podman exec "${tty[@]}" --user 1000:1000 -w "$root" "$name" "${tool_cmd[@]}" "$@"
+fi
+
+# --- The image ----------------------------------------------------------------------------------
+# Built in a folder of its own: the template's image files, and the machine's company root
+# certificate if it has one (an empty file otherwise; see image/Dockerfile). Then the project's own
+# .devcontainer/Dockerfile on top, if it has one.
+echo "==> Building the image (cached after the first time)"
+context="$(mktemp -d)"
+trap 'rm -rf "$context"' EXIT
+cp "$template/image/Dockerfile" "$template/image/start.sh" "$template/image/init-firewall.sh" "$context/"
+company_cert="${XDG_CONFIG_HOME:-$HOME/.config}/ai-container/company-root.crt"
+if [ -f "$company_cert" ]; then cp "$company_cert" "$context/company-root.crt"; else : > "$context/company-root.crt"; fi
+own_dockerfile="$root/.devcontainer/Dockerfile"
+base_tag="$image"; [ -f "$own_dockerfile" ] && base_tag="$image-base"
+# A rebuild is a new REBUILT value, the time of it: every step below that line in image/Dockerfile
+# runs again, with the base image pulled anew, and the result is cached for later starts, which pass
+# the same value. (--no-cache would rebuild too, but leave nothing to reuse, so the next start would
+# build everything once more.) The project's Dockerfile follows on its own: its base has changed.
+if $rebuild; then
+  rebuilt_at="$(date +%s)"
+  pull=(--pull)
+else
+  rebuilt_at="$(cat "$rebuilt_stamp" 2>/dev/null || true)"
+  [[ "$rebuilt_at" =~ ^[0-9]+$ ]] || rebuilt_at=0
+  pull=()
+fi
+podman build -q "${pull[@]}" --build-arg REBUILT="$rebuilt_at" --build-arg BASE_IMAGE="$base_image" \
+  --build-arg APT_PACKAGES="${apt_packages[*]}" -t "$base_tag" "$context" >/dev/null
+if [ -f "$own_dockerfile" ]; then
+  podman build -q --build-arg BASE="$base_tag" -t "$image" -f "$own_dockerfile" "$root/.devcontainer" >/dev/null
+fi
+rm -rf "$context"
+trap - EXIT
+# Only a rebuild dates the image (see rebuilt_stamp above).
+if $rebuild; then
+  mkdir -p "$(dirname "$rebuilt_stamp")"
+  echo "$rebuilt_at" > "$rebuilt_stamp"
+fi
+
+# --- Mounts, keys and start ---------------------------------------------------------------------
+# What the host runs on its own, read-only in here. Created first when missing: a directory that does
+# not exist cannot be mounted, and one the agent could create here is one the IDE would later run
+# from out there — a run configuration in .idea or .run, a hook, a task in .vscode.
+# .mcp.json is a file and is protected only when it exists; a new one made in here still needs your
+# approval in a host session before Claude starts what it names.
+for dir in .claude .codex .idea .vscode .run; do mkdir -p "$root/$dir"; done
+protected=(.git/hooks .git/config .claude .codex .mcp.json .idea .vscode .run .npmrc .devcontainer)
+# A hook directory of the project's own (husky and the like) runs on the host at every commit.
+hooks_path="$(git -C "$root" config core.hooksPath || true)"
+[ -n "$hooks_path" ] && [ "${hooks_path#/}" = "$hooks_path" ] && protected+=("$hooks_path")
+# IDE folders deeper in, where a sub-project was opened on its own. Only the ones that exist; the
+# root's are the ones an IDE opens by default.
+while IFS= read -r dir; do protected+=("${dir#"$root"/}"); done < <(
+  find "$root" -mindepth 2 -maxdepth 4 \( -name node_modules -o -name .git -o -name bin -o -name obj \) -prune \
+    -o -type d \( -name .idea -o -name .vscode -o -name .run \) -print)
+
+mounts=(-v "$root:$root")
+for path in "${protected[@]}"; do
+  if [ -e "$root/$path" ]; then
+    mounts+=(-v "$root/$path:$root/$path:ro")
+  fi
+done
+
+# Claude keeps its memory per project, under a name taken from the working directory. Mounting the
+# project at the same path keeps that name, so the memory written on the host is found in here.
+project_key="$(echo "$root" | sed 's#[/.]#-#g')"
+memory="$HOME/.claude/projects/$project_key/memory"
+mkdir -p "$memory"
+mounts+=(-v "$memory:/home/ubuntu/.claude/projects/$project_key/memory")
+
+# Commits made inside carry your name. git's own config is read-only in there, so it comes this way.
+git_env=()
+git_name="$(git -C "$root" config user.name || true)"
+git_email="$(git -C "$root" config user.email || true)"
+[ -n "$git_name" ] && git_env+=(-e "GIT_AUTHOR_NAME=$git_name" -e "GIT_COMMITTER_NAME=$git_name")
+[ -n "$git_email" ] && git_env+=(-e "GIT_AUTHOR_EMAIL=$git_email" -e "GIT_COMMITTER_EMAIL=$git_email")
+
+# Keys for the agents' own test runs (agent_keys), from a file outside the repository: one
+# NAME=value per line, chmod 600. Only the names listed are passed on, whatever else the file holds,
+# and by name (-e NAME), so the values never appear on a command line. Without the file, nothing.
+agent_env=()
+agent_env_file="${agent_env_file:-$HOME/.config/$project/agent.env}"
+if [ ${#agent_keys[@]} -gt 0 ] && [ -f "$agent_env_file" ]; then
+  if [ -n "$(find "$agent_env_file" -perm /077)" ]; then
+    echo "Refusing $agent_env_file: others can read it. Run: chmod 600 $agent_env_file"; exit 1
+  fi
+  for key in "${agent_keys[@]}"; do
+    value="$(sed -n "s/^$key=//p" "$agent_env_file" | tail -n 1)"
+    if [ -n "$value" ]; then
+      export "$key=$value"
+      agent_env+=(-e "$key")
+    fi
+  done
+  unset value
+fi
+
+# Published to 127.0.0.1 only: this machine's browser reaches them, nothing else on the network does.
+publish=()
+for port in "${published[@]}"; do publish+=(-p "127.0.0.1:$port:$port"); done
+if [ ${#published[@]} -gt 0 ]; then echo "==> Ports open to this machine: ${published[*]}"; fi
+
+# --memory and --pids-limit cap what a runaway build, test or loop can take from the machine (or from
+# WSL, where it would take everything else in WSL down with it).
+# --user 0 only for start.sh, which raises the firewall and then drops to your uid for good.
+# keep-id maps your uid to the same number inside, so files written here are owned by you.
+exec podman run --rm "${tty[@]}" \
+  --name "$name" \
+  --hostname "$name" \
+  --userns=keep-id \
+  --user 0:0 \
+  --cap-add=NET_ADMIN --cap-add=NET_RAW \
+  --security-opt=no-new-privileges \
+  --memory 8g --pids-limit 4096 \
+  --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=1 \
+  -e FIREWALL_MODE="$firewall_mode" \
+  -e PUBLISHED_PORTS="${published[*]}" \
+  -e STRICT_HOSTS="${strict_hosts[*]}" \
+  "${publish[@]}" \
+  "${mounts[@]}" \
+  -v "$volumes-config:/home/ubuntu/.claude" \
+  -v "$volumes-codex:/home/ubuntu/.codex" \
+  -v "$volumes-cache:/home/ubuntu/.cache" \
+  -v "$volumes-npm:/home/ubuntu/.npm" \
+  -v "$volumes-nuget:/home/ubuntu/.nuget" \
+  -e CLAUDE_CONFIG_DIR=/home/ubuntu/.claude \
+  "${git_env[@]}" \
+  "${agent_env[@]}" \
+  -w "$root" \
+  "$image" "${tool_cmd[@]}" "$@"

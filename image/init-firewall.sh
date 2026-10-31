@@ -2,11 +2,12 @@
 # Outbound network for the AI agent container, in one of two modes chosen on the host:
 #
 #   open   (default)  web traffic (HTTP/HTTPS) goes anywhere; every other port is refused.
-#   strict            only DNS, the container itself, and the hosts listed below.
+#   strict            only DNS, the container itself, the hosts listed below, and the project's
+#                     strict_hosts.
 #
-# The mode comes from FIREWALL_MODE, set by scripts/ai-container.sh. That script is read-only
-# inside, so Claude cannot pick the mode for itself. If this script fails, start.sh stops and Claude
-# never starts — the container never runs without it.
+# The mode comes from FIREWALL_MODE and the project's hosts from STRICT_HOSTS, both set by ai-container
+# on the host from settings that are read-only inside, so Claude cannot pick either for itself. If
+# this script fails, start.sh stops and Claude never starts — the container never runs without it.
 #
 # Open is the default because the container exists to keep a mistaken command inside this project,
 # and the network has no part in that. What open gives up is a barrier against the project being
@@ -17,7 +18,7 @@ IFS=$'\n\t'
 mode="${FIREWALL_MODE:-open}"
 case "$mode" in open|strict) ;; *) echo "Unknown FIREWALL_MODE: $mode"; exit 1 ;; esac
 
-# Used by strict only. Add what the project restores from and reads.
+# Used by strict only: what every project needs. A project adds its own with strict_hosts.
 # Each host is looked up once, at start, and its IPv4 addresses let through on any port. That makes
 # strict an allowlist of addresses, not of names: another site on the same address (a CDN) is reached
 # too, and a host that moves to a new address is blocked until the container starts again.
@@ -30,12 +31,20 @@ ALLOWED_HOSTS=(
   api.openai.com
   chatgpt.com
   auth.openai.com
-  # Package registries the project restores from
+  # Package registries
   registry.npmjs.org
+  api.nuget.org
   # Documentation looked up while working
   code.claude.com
   docs.claude.com
 )
+# The project's strict_hosts, separated by spaces. The launcher has checked them already; checked
+# again here, since this script must not trust what it is given.
+IFS=' ' read -r -a project_hosts <<< "${STRICT_HOSTS:-}"
+for host in "${project_hosts[@]}"; do
+  [[ "$host" =~ ^([a-z0-9-]+\.)+[a-z0-9-]+$ ]] || { echo "Not a host name: $host"; exit 1; }
+  ALLOWED_HOSTS+=("$host")
+done
 
 iptables -F
 iptables -X

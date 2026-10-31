@@ -1,4 +1,4 @@
-# Standard .gitignore for a project run with the ai-container. Offered by scripts/ai-container.sh
+# Standard .gitignore for a project run with ai-container. Offered by `ai-container init` and at start
 # when a project has none. Remove what does not fit: in a team project .run/ is often shared on
 # purpose, and notes/ may be meant for everyone.
 
@@ -25,3 +25,16 @@ obj/
 .env.*
 !.env.example
 *.local
+
+# Empty placeholders Claude's sandbox creates in the repository root and mounts /dev/null over, so
+# nothing run inside it can plant these files. They come back with every sandboxed session. A project
+# that keeps a real .mcp.json or .gitmodules in its root removes that line.
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.gitmodules
+/.mcp.json
+/.profile
+/.ripgreprc
+/.zprofile
+/.zshrc

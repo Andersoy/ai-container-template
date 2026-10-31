@@ -149,8 +149,31 @@ else
 fi
 note "Project secrets in ~/.config/<project> are added to sandbox.credentials.files by hand."
 
-# --- 4. Checks that only report ---------------------------------------------------------------
-step "4. The rest of the machine (reported, not changed)"
+# --- 4. ai-container on PATH ------------------------------------------------------------------
+step "4. The ai-container command"
+explain "A link in ~/.local/bin to the launcher in this folder, so \`ai-container\` works in every
+project. Projects hold only their settings; a \`git pull\` here updates the launcher for all of them."
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+link="$HOME/.local/bin/ai-container"
+if [ "$(readlink -f "$link" 2>/dev/null)" = "$here/bin/ai-container" ]; then
+  ok "$link -> $here/bin/ai-container"
+elif [ -e "$link" ] || [ -L "$link" ]; then
+  todo "$link exists but points elsewhere; move it aside, then run this again"
+else
+  todo "$link"
+  if ! $check_only && confirm "Create the link?"; then
+    mkdir -p "$HOME/.local/bin"
+    ln -s "$here/bin/ai-container" "$link"
+    ok "link created"
+  fi
+fi
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ok "~/.local/bin is on PATH" ;;
+  *) note "~/.local/bin is not on PATH yet. Ubuntu's ~/.profile adds it at login once the folder exists: log out and in, or open a new login shell." ;;
+esac
+
+# --- 5. Checks that only report ---------------------------------------------------------------
+step "5. The rest of the machine (reported, not changed)"
 
 if [ "$(id -u)" = 1000 ]; then
   ok "your user id is 1000, as the image's user is"
