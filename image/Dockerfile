@@ -57,6 +57,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global \
     PATH=/usr/local/share/npm-global/bin:$PATH
 
+# Node's own fetch (used by Next.js, the Sanity client and many others) goes through the proxy Claude's
+# sandbox sets in HTTPS_PROXY; without this it tries to connect directly and the sandbox stops it.
+# Outside the sandbox no proxy is set, and it changes nothing.
+ENV NODE_USE_ENV_PROXY=1
+
 # The image's ordinary user is `ubuntu`, uid 1000 — the same number as yours on the host. Podman's
 # keep-id mapping relies on that, so files Claude writes in the project are owned by you.
 # The folders on the second line are where Claude's own sandbox lets commands write (sandbox_writable
