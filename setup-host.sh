@@ -224,5 +224,6 @@ if [ "$missing" -eq 0 ]; then
 elif $check_only; then
   echo "$missing item(s) missing. Run ./setup-host.sh without --check to set them up."
 else
-  echo "$missing item(s) were missing; run ./setup-host.sh --check to see what is left."
+  echo "$missing item(s) were missing when this started; any you said yes to are set up now."
+  echo "Run ./setup-host.sh --check to confirm that nothing is left."
 fi
