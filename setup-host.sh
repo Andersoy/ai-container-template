@@ -33,10 +33,11 @@ grep -qi microsoft /proc/version 2>/dev/null && wsl=true
 
 # --- 1. Packages ------------------------------------------------------------------------------
 step "1. Packages"
-explain "podman, uidmap and passt run the containers without root. bubblewrap and socat are what
-Claude Code's sandbox is built from, on the host and inside the containers. whiptail draws the
-launcher's menus. All come from Ubuntu's own archive."
-packages=(podman uidmap passt bubblewrap socat whiptail)
+explain "podman, uidmap and passt run the containers without root, and catatonit is the small first
+process in each container that collects finished processes and passes on signals. bubblewrap and
+socat are what Claude Code's sandbox is built from, on the host and inside the containers. whiptail
+draws the launcher's menus. All come from Ubuntu's own archive."
+packages=(podman uidmap passt catatonit bubblewrap socat whiptail)
 absent=()
 for pkg in "${packages[@]}"; do
   if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
@@ -169,7 +170,7 @@ else
 fi
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ok "~/.local/bin is on PATH" ;;
-  *) note "~/.local/bin is not on PATH yet. Ubuntu's ~/.profile adds it at login once the folder exists: log out and in, or open a new login shell." ;;
+  *) note "~/.local/bin is not on PATH yet. Ubuntu's ~/.profile adds it once the folder exists, but only in terminals opened after that: in this one, run \`source ~/.profile\`." ;;
 esac
 
 # --- 5. Checks that only report ---------------------------------------------------------------

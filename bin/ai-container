@@ -19,8 +19,9 @@
 # .devcontainer/ai-container.conf, read as data and checked value by value, never run.
 #
 # The container lives exactly as long as the program it was started with, and is deleted when that
-# ends. Only the project, Claude's memory, the logins and the caches carry over; anything installed
-# during a session is gone next time, so a tool the project always needs belongs in the image.
+# ends, taking every session started in it since. Only the project, Claude's memory, the logins and
+# the caches carry over; anything installed during a session is gone next time, so a tool the
+# project always needs belongs in the image.
 #
 # What the container can reach:
 #   - the project, at the same path as on the host, so Claude's memory for it still lines up
@@ -48,7 +49,7 @@ set -euo pipefail
 template="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 
 usage() {
-  echo "Usage: ai-container                       (menus)"
+  echo "Usage: ai-container [--strict] [--rebuild] [--port N]...   (menus)"
   echo "       ai-container [--strict] [--rebuild] [--port N]... <claude|codex|bash> [arguments for it]"
   echo "       ai-container init [--dotnet]       (set up the project in this folder)"
   echo "First time with Codex: ai-container codex login --device-auth"
@@ -184,10 +185,6 @@ firewall_mode=open
 rebuild=false
 published=()
 port_flag=false
-# Menus when started with nothing after it, in a terminal, and whiptail is there (it is on Ubuntu).
-interactive=false
-if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ] && command -v whiptail >/dev/null; then interactive=true; fi
-$interactive || published=("${ports[@]}")
 while :; do
   case "${1:-}" in
     --strict) firewall_mode=strict; shift ;;
@@ -198,6 +195,12 @@ while :; do
     *) break ;;
   esac
 done
+# Menus when no tool is named, in a terminal, and whiptail is there (it is on Ubuntu). Flags given
+# before still count: --rebuild skips the rebuild question, --strict is the network menu's default.
+interactive=false
+if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ] && command -v whiptail >/dev/null; then interactive=true; fi
+# Without menus, the project's ports are all opened; with them, they come ticked.
+$interactive || published=("${ports[@]}" "${published[@]}")
 
 tool=""
 if ! $interactive; then
@@ -236,7 +239,15 @@ tty=(-i); [ -t 0 ] && [ -t 1 ] && tty=(-it)
 # Already running: start the tool in that container, as the same unprivileged user.
 # (`podman container exists` is true for a stopped one too, which would send us into a dead container.)
 running=false
-[ -n "$(podman ps --filter "name=^${name}$" --format '{{.Names}}')" ] && running=true
+running_for="$(podman ps --filter "name=^${name}$" --format '{{.RunningFor}}')"
+[ -n "$running_for" ] && running=true
+# The firewall, the ports, the keys and the image were fixed when it started; nothing here changes
+# them. Asked for and not possible is a stop, not a warning: --strict above all, since carrying on
+# would give open network to someone who asked for it shut.
+if $running && { [ "$firewall_mode" = strict ] || $rebuild || $port_flag; }; then
+  echo "Already running — --strict, --rebuild and --port only apply when the container starts. Stop it first." >&2
+  exit 1
+fi
 
 # How old the image's packages are, counted from the last --rebuild, which this script records. Not
 # from the image's own creation time: a Dockerfile change resets that, while the steps above the
@@ -270,7 +281,7 @@ if $interactive; then
   tool="$(ask --menu "$note" 14 74 3 \
     claude "Claude Code" codex "OpenAI Codex" bash "A shell")" || { echo "Cancelled."; exit 0; }
   if ! $running; then
-    firewall_mode="$(ask --default-item open --menu "Network" 13 74 2 \
+    firewall_mode="$(ask --default-item "$firewall_mode" --menu "Network" 13 74 2 \
       open   "Web open; home network, other ports and IPv6 shut" \
       strict "Only the agents' hosts, the registries and strict_hosts")" || { echo "Cancelled."; exit 0; }
     if [ ${#ports[@]} -gt 0 ]; then
@@ -286,7 +297,7 @@ if $interactive; then
       [[ "$port" =~ ^[0-9]+$ ]] || { echo "Not a port number: $port"; exit 1; }
       published+=("$port")
     done
-    if $image_exists; then
+    if $image_exists && ! $rebuild; then
       # Yes is the default once the image is past rebuild_after_days, so the safe answer is one keypress.
       default=(--defaultno); [ -n "$age_note" ] && default=()
       if ask "${default[@]}" --yesno "${age_note:+$age_note\n\n}Rebuild the image from scratch?\n\nFetches the base image and every package anew — worth doing every couple of weeks and after a security fix. Takes a few minutes." 14 74; then
@@ -316,13 +327,9 @@ if [ "$tool" = claude ]; then
 fi
 
 if $running; then
-  # The firewall, the ports, the keys and the image were fixed when it started; nothing here changes
-  # them. Asked for and not possible is a stop, not a warning: --strict above all, since carrying on
-  # would give open network to someone who asked for it shut.
-  if [ "$firewall_mode" = strict ] || $rebuild || $port_flag; then
-    echo "Already running — --strict, --rebuild and --port only apply when the container starts. Stop it first." >&2
-    exit 1
-  fi
+  # Said every time, so a session left running in a window you forgot is noticed. Ending that first
+  # session stops the container, and this one with it.
+  echo "==> $name is already running (started ${running_for,}); starting $tool in it." >&2
   exec podman exec "${tty[@]}" --user 1000:1000 -w "$root" "$name" "${tool_cmd[@]}" "$@"
 fi
 
@@ -421,15 +428,23 @@ if [ ${#agent_keys[@]} -gt 0 ] && [ -f "$agent_env_file" ]; then
 fi
 
 # Published to 127.0.0.1 only: this machine's browser reaches them, nothing else on the network does.
+# Each once: a port given with --port may be in `ports` too, and Podman refuses one published twice.
+mapfile -t published < <(printf '%s\n' "${published[@]}" | awk 'NF && !seen[$0]++')
 publish=()
 for port in "${published[@]}"; do publish+=(-p "127.0.0.1:$port:$port"); done
 if [ ${#published[@]} -gt 0 ]; then echo "==> Ports open to this machine: ${published[*]}"; fi
 
 # --memory and --pids-limit cap what a runaway build, test or loop can take from the machine (or from
 # WSL, where it would take everything else in WSL down with it).
+# --init puts Podman's catatonit in as the container's first process (PID 1), in front of the agent.
+# Linux gives that process two jobs an agent does not do: collecting finished processes no one else
+# waits for (each sandboxed command left one behind, a "zombie"), and passing on signals, which go
+# unheard by a PID 1 that has not asked for them. Without it, closing the terminal did not end
+# Claude, and the container stayed up with no window. catatonit exits when the agent does, and Linux
+# then ends everything else in the container. `podman kill <name>` stops it from the host regardless.
 # --user 0 only for start.sh, which raises the firewall and then drops to your uid for good.
 # keep-id maps your uid to the same number inside, so files written here are owned by you.
-exec podman run --rm "${tty[@]}" \
+exec podman run --rm --init "${tty[@]}" \
   --name "$name" \
   --hostname "$name" \
   --userns=keep-id \

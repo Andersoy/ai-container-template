@@ -6,6 +6,11 @@
 # Anything Claude installs during a session is gone the next time the container starts, so what the
 # project always needs belongs here, where it is in the image and visible in git. Pin what you add,
 # and keep a pinned tool in step with the project's own version of it.
+#
+# Change only what a step adds itself, never files that come from the template's image. Each RUN is
+# a layer of its own, and a file it changes — its permissions included — is stored in it once more,
+# in full: a chmod over /usr/local/share/npm-global copies Claude Code and Codex (~1.1 GB) into the
+# layer. `podman history <image>` shows what each layer weighs.
 ARG BASE
 FROM ${BASE}
 
@@ -17,7 +22,7 @@ FROM ${BASE}
 # ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright
 # RUN npm install -g playwright@1.63.0 \
 #     && npx playwright install --with-deps chromium \
-#     && chmod -R a+rX /usr/local/share/ms-playwright /usr/local/share/npm-global \
+#     && chmod -R a+rX /usr/local/share/ms-playwright /usr/local/share/npm-global/lib/node_modules/playwright \
 #     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # A tool installed as the ordinary user, such as EF Core's command line for migrations. ~/.dotnet/tools

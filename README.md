@@ -13,15 +13,16 @@ git clone https://github.com/Andersoy/ai-container-template ~/programming/ai-con
 
 `setup-host.sh` checks every step first and only does what is missing, so it is safe to run again:
 
-1. **Packages:** `podman uidmap passt` for the containers, `bubblewrap socat` for Claude's sandbox on
-   the host, `whiptail` for the menus.
+1. **Packages:** `podman uidmap passt catatonit` for the containers, `bubblewrap socat` for Claude's
+   sandbox on the host, `whiptail` for the menus.
 2. **AppArmor:** on Ubuntu 24.04 and later, the profile that lets `bwrap` create user namespaces —
    Anthropic's own, from the Claude Code docs, the same form Ubuntu ships for Podman. Skipped where
    the restriction is off (often under WSL2).
 3. **Claude settings on the host** (`~/.claude/settings.json`, backed up first): manual permission
    mode with bypass and auto disabled, and the sandbox on — still asking before each command,
    refusing to start without it, and with credential folders unreadable to commands.
-4. **The `ai-container` command:** a link in `~/.local/bin` to `bin/ai-container` here.
+4. **The `ai-container` command:** a link in `~/.local/bin` to `bin/ai-container` here. A terminal
+   opened before `~/.local/bin` existed does not have it on PATH: `source ~/.profile` there.
 5. **Checks it only reports on:** uid 1000, rootless Podman, where `runc` comes from (keep
    `containerd.io` installed: Ubuntu does not patch Podman's or crun's in `universe` without Ubuntu
    Pro), and services you may not want running (the Docker daemon, the system-wide Podman socket).
@@ -46,6 +47,7 @@ ai-container bash               # a shell
 ai-container --strict claude    # any of them, with only the allowed hosts reachable
 ai-container --rebuild claude   # rebuild the image from scratch first
 ai-container --port 3000 claude # open a port for a dev server (repeatable)
+ai-container --rebuild          # the flags work with the menus too
 ```
 
 The first start builds the image (a few minutes, ~1 GB downloaded); later starts take seconds. If the
@@ -53,6 +55,11 @@ container is already running, the tool starts inside that one, so Claude and Cod
 same project side by side; `--strict`, `--rebuild` and `--port` then stop with a message rather than
 join it without what you asked for. The container is named after the project folder, and each
 project keeps its own image, logins and caches.
+
+The container lasts as long as the session that started it. When that one ends — `/exit`, or its
+terminal closed — the container stops, and every session joined to it since (a shell, a dev server,
+the other agent) ends with it. Joining says how long the container has been running, so a session
+left open in a forgotten window is noticed. `podman kill ai-<folder>` stops one from the host.
 
 **A new project:** in its root folder, `ai-container init` (or `ai-container init --dotnet`). It writes
 `.devcontainer/ai-container.conf`, with a comment on every line, and a standard `.gitignore` if the
