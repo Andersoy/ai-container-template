@@ -90,9 +90,12 @@ on the host with your rights, look at what is coming before you take it:
 cd ~/programming/ai-container-template
 git fetch && git log -p HEAD..origin/main   # read it
 git pull
+./setup-host.sh --check                     # anything the update needs on this machine
 ```
 
-The next start in each project rebuilds what the change touched.
+The next start in each project rebuilds what the change touched. An update may also need something
+new on the machine itself, such as a package; `--check` says so, and `./setup-host.sh` then sets up
+only that.
 
 **The image:** cached, so Claude Code, Node and the Ubuntu packages stay at the versions the last
 rebuild got. `--rebuild` fetches the base image and every package anew; run it every couple of weeks,
